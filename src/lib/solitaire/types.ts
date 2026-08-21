@@ -115,6 +115,20 @@ export type MoveLogActor = "manual" | "autoplay";
 
 export type MoveLogAction = "move" | "draw" | "redeal" | "undo" | "deal";
 
+export type MoveStep = { from: Source; to: Dest };
+
+export type ComboStep = { combo: [MoveStep, MoveStep] };
+
+export type LogStep = MoveStep | ComboStep | "draw";
+
+export function isComboStep(step: LogStep): step is ComboStep {
+  return typeof step === "object" && step !== null && "combo" in step;
+}
+
+export function isMoveStep(step: LogStep): step is MoveStep {
+  return typeof step === "object" && step !== null && "from" in step;
+}
+
 export type MoveLogEntry = {
   n: number;
   at: number;
@@ -122,6 +136,12 @@ export type MoveLogEntry = {
   action: MoveLogAction;
   label: string;
   hints: string[];
+  step?: LogStep;
+  tried?: string[];
+  path?: number;
+  move?: number;
+  choice?: number;
+  parentPath?: number;
 };
 
 export type DealLog = {

@@ -10,6 +10,7 @@ import type {
 
 const KEY = "klondike.v1";
 const LOGS_KEY = "klondike.logs.v1";
+const TEMP_RESET = "klondike.temp-reset.3";
 const SAVE_VERSION = 1 as const;
 
 export const defaultSettings: Settings = {
@@ -86,6 +87,13 @@ function normalizeLogEntry(value: unknown): MoveLogEntry | null {
     hints: Array.isArray(value.hints)
       ? value.hints.filter((item) => typeof item === "string")
       : [],
+    tried: Array.isArray(value.tried)
+      ? value.tried.filter((item) => typeof item === "string")
+      : undefined,
+    path: typeof value.path === "number" ? value.path : undefined,
+    move: typeof value.move === "number" ? value.move : undefined,
+    choice: typeof value.choice === "number" ? value.choice : undefined,
+    parentPath: typeof value.parentPath === "number" ? value.parentPath : undefined,
   };
 }
 
@@ -98,6 +106,52 @@ function isDealLog(value: unknown): value is DealLog {
     Array.isArray(row.entries) &&
     row.entries.every((entry) => normalizeLogEntry(entry) !== null)
   );
+}
+
+export function clearTempData(): void {
+  try {
+    localStorage.removeItem(LOGS_KEY);
+    const raw = localStorage.getItem(KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw) as Partial<Snapshot>;
+    if (!parsed?.settings) {
+      localStorage.removeItem(KEY);
+      return;
+    }
+    const settings = {
+      drawCount: parsed.settings.drawCount === 1 ? 1 : 3,
+      sound: parsed.settings.sound !== false,
+    } as Settings;
+    const stats = parsed.stats && typeof parsed.stats.played === "number"
+      ? parsed.stats
+      : { ...defaultStats };
+    const payload: Snapshot = {
+      version: SAVE_VERSION,
+      state: createGame({ drawCount: settings.drawCount }),
+      history: [],
+      settings,
+      stats,
+      log: [],
+    };
+    localStorage.setItem(KEY, JSON.stringify(payload));
+  } catch {
+    try {
+      localStorage.removeItem(KEY);
+      localStorage.removeItem(LOGS_KEY);
+    } catch {
+      // ignore
+    }
+  }
+}
+
+export function clearTempDataOnce(): void {
+  try {
+    if (localStorage.getItem(TEMP_RESET) === "1") return;
+    clearTempData();
+    localStorage.setItem(TEMP_RESET, "1");
+  } catch {
+    // ignore
+  }
 }
 
 export function loadSnapshot(): Snapshot | null {

@@ -7,6 +7,7 @@ import {
 } from "./Board";
 import { FallingCards } from "./FallingCards";
 import { Hud } from "./Hud";
+import { SearchTree } from "./SearchTree";
 import {
   ConfirmNew,
   HelpOverlay,
@@ -25,18 +26,27 @@ import {
   elapsedSeconds,
   findAutoMove,
   findAutoplayStep,
+  findDfsBranch,
   findFoundationStep,
   findHint,
   hintsForAction,
   isMovable,
   isStuck,
+  listDecisionBranches,
+  maxPathId,
+  playsForPath,
+  replayDeal,
+  stepFromLabel,
+  applyStep,
   positionKey,
   sourcesEqual,
   tryMove,
 } from "@/lib/solitaire/engine";
 import { playSfx, setSoundEnabled, unlockAudio } from "@/lib/solitaire/audio";
+import { isComboStep } from "@/lib/solitaire/types";
 import {
   archiveDeal,
+  clearTempDataOnce,
   defaultSettings,
   defaultStats,
   loadDealLogs,
@@ -50,6 +60,7 @@ import type {
   Dest,
   DealLog,
   GameState,
+  LogStep,
   MoveLogAction,
   MoveLogActor,
   MoveLogEntry,
@@ -58,6 +69,29 @@ import type {
   Source,
   Stats,
 } from "@/lib/solitaire/types";
+
+function uniqueTried(labels: Array<string | undefined>): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of labels) {
+    const label = raw?.replace(/^\*\s*/, "").trim();
+    if (!label || seen.has(label)) continue;
+    seen.add(label);
+    out.push(label);
+  }
+  return out;
+}
+
+function isFlipLabel(label: string): boolean {
+  return /^(Draw \d+|Redeal stock)$/i.test(label.trim());
+}
+
+function choiceIndex(hints: string[], label: string): number {
+  const want = label.replace(/^\*\s*/, "").trim();
+  const options = uniqueTried(hints).filter((item) => !isFlipLabel(item));
+  const at = options.indexOf(want);
+  return at >= 0 ? at + 1 : 1;
+}
 
 function destOf(from: Source): Dest | null {
   if (from.pile === "waste") return null;
@@ -82,6 +116,7 @@ export function Game() {
   const [toast, setToast] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [autoplay, setAutoplay] = useState(false);
+  const [search, setSearch] = useState(false);
   const [log, setLog] = useState<MoveLogEntry[]>([]);
   const [showLog, setShowLog] = useState(false);
   const [pastLogs, setPastLogs] = useState<DealLog[]>([]);
@@ -94,8 +129,21 @@ export function Game() {
   const completeRef = useRef(false);
   const [hydrated, setHydrated] = useState(false);
   const [stuckDismissed, setStuckDismissed] = useState(false);
+  const pathRef = useRef(1);
+  const moveRef = useRef(0);
+  const logRef = useRef(log);
+  const searchRef = useRef(search);
+  const handleBranchRef = useRef<(
+    path: number,
+    move: number,
+    label: string,
+    opts?: { keepAuto?: boolean; actor?: MoveLogActor },
+  ) => boolean>(() => false);
+  logRef.current = log;
+  searchRef.current = search;
 
   useEffect(() => {
+    clearTempDataOnce();
     const snap = loadSnapshot();
     if (snap) {
       setState(snap.state);
@@ -103,6 +151,13 @@ export function Game() {
       setSettings(snap.settings);
       setStats(snap.stats);
       setLog(snap.log ?? []);
+      const rows = snap.log ?? [];
+      pathRef.current = maxPathId(rows);
+      const onPath = rows.filter((row) => (row.path ?? 1) === pathRef.current);
+      moveRef.current = onPath.reduce(
+        (max, row) => Math.max(max, row.move ?? row.n),
+        0,
+      );
       setPastLogs(loadDealLogs());
       setWinRecorded(snap.state.won);
       setSoundEnabled(snap.settings.sound);
@@ -150,18 +205,19 @@ export function Game() {
 
   useEffect(() => {
     if (!hydrated || state.won) return;
+    if (search && autoplay) return;
     if (isStuck(state)) {
       setState((s) =>
         s.won || s.finishedAt ? s : { ...s, finishedAt: Date.now() },
       );
-      setAutoplay(false);
+      if (!search) setAutoplay(false);
       return;
     }
     setStuckDismissed(false);
     if (state.finishedAt) {
       setState((s) => (s.finishedAt ? { ...s, finishedAt: null } : s));
     }
-  }, [hydrated, state]);
+  }, [autoplay, hydrated, search, state]);
 
   const showToast = useCallback((text: string) => {
     setToast(text);
@@ -175,13 +231,30 @@ export function Game() {
       action: MoveLogAction,
       label: string,
       hints: string[] = [],
+      step?: LogStep,
     ) => {
-      setLog((rows) =>
-        [
+      setLog((rows) => {
+        moveRef.current += 1;
+        const path = pathRef.current;
+        const move = moveRef.current;
+        const choice = choiceIndex(hints, label);
+        return [
           ...rows,
-          { n: rows.length + 1, at: Date.now(), actor, action, label, hints },
-        ].slice(-400),
-      );
+          {
+            n: rows.length + 1,
+            at: Date.now(),
+            actor,
+            action,
+            label,
+            hints,
+            step,
+            tried: [label],
+            path,
+            move,
+            choice,
+          },
+        ].slice(searchRef.current ? -4000 : -800);
+      });
     },
     [],
   );
@@ -195,6 +268,7 @@ export function Game() {
         action: MoveLogAction;
         label: string;
         hints?: string[];
+        step?: LogStep;
       },
     ) => {
       setHistory((h) => [...h.slice(-39), cloneState(state)]);
@@ -211,7 +285,7 @@ export function Game() {
       setState(next);
       setSelected(null);
       setHint(null);
-      appendLog(meta.actor, meta.action, meta.label, meta.hints ?? []);
+      appendLog(meta.actor, meta.action, meta.label, meta.hints ?? [], meta.step);
     },
     [appendLog, state, winRecorded],
   );
@@ -235,6 +309,8 @@ export function Game() {
       );
       setHistory([]);
       setLog([]);
+      pathRef.current = 1;
+      moveRef.current = 0;
       setSelected(null);
       setHint(null);
       setWinRecorded(false);
@@ -283,6 +359,7 @@ export function Game() {
       action: state.stock.length === 0 ? "redeal" : "draw",
       label: describeAction(state, "draw"),
       hints: hintsForAction(state, "draw"),
+      step: "draw",
     });
   }, [autoplay, busy, commit, state, stuckDismissed]);
 
@@ -304,6 +381,7 @@ export function Game() {
         action: "move",
         label: describeAction(state, { from, to }),
         hints: hintsForAction(state, { from, to }),
+        step: { from, to },
       });
       return true;
     },
@@ -334,6 +412,123 @@ export function Game() {
     },
     [autoplay, busy, handleMove, selected],
   );
+
+  const handleBranch = useCallback(
+    (
+      path: number,
+      move: number,
+      label: string,
+      opts?: { keepAuto?: boolean; actor?: MoveLogActor },
+    ): boolean => {
+      unlockAudio();
+      if (!opts?.keepAuto) setAutoplay(false);
+      const origin = createGame({
+        seed: state.seed,
+        drawCount: state.drawCount,
+        dealId: state.dealId,
+      });
+      const lineage =
+        move < 0
+          ? playsForPath(log, path)
+          : playsForPath(log, path).filter(
+              (row) => (row.move ?? row.n) < move,
+            );
+      const before =
+        move < 0 ? cloneState(state) : replayDeal(origin, lineage);
+      if (!before) {
+        playSfx("illegal");
+        return false;
+      }
+      const step = stepFromLabel(before, label);
+      if (!step) {
+        playSfx("illegal");
+        return false;
+      }
+      const next = applyStep(before, step);
+      if (!next) {
+        playSfx("illegal");
+        return false;
+      }
+      const prior = log.find(
+        (row) =>
+          row.action !== "undo" &&
+          (row.path ?? 1) === path &&
+          (row.move ?? row.n) === move,
+      );
+      const tried = uniqueTried([
+        ...(prior?.tried ?? []),
+        prior?.label,
+        label,
+        ...(prior?.hints ?? []).filter((hint) => hint.startsWith("*")),
+      ]);
+      const options = uniqueTried([
+        ...(prior?.hints ?? []).map((hint) => hint.replace(/^\*\s*/, "")),
+        ...hintsForAction(before, step).map((hint) =>
+          hint.replace(/^\*\s*/, ""),
+        ),
+      ]);
+      const hints = options.map((item) =>
+        tried.includes(item) ? `* ${item}` : item,
+      );
+      const action: MoveLogAction =
+        step === "draw"
+          ? before.stock.length === 0
+            ? "redeal"
+            : "draw"
+          : "move";
+      const newPath = maxPathId(log) + 1;
+      const branchMove = move < 0 ? moveRef.current + 1 : move;
+      const choice = choiceIndex(hints, label);
+      pathRef.current = newPath;
+      moveRef.current = branchMove;
+      const row: MoveLogEntry = {
+        n: log.length + 1,
+        at: Date.now(),
+        actor: opts?.actor ?? "manual",
+        action,
+        label: describeAction(before, step),
+        hints,
+        step,
+        tried,
+        path: newPath,
+        move: branchMove,
+        choice,
+        parentPath: path,
+      };
+      setHistory([cloneState(before)]);
+      setLog((rows) => {
+        const updated = rows.map((item) => {
+          if (
+            item.action === "undo" ||
+            (item.path ?? 1) !== path ||
+            (item.move ?? item.n) !== move
+          ) {
+            return item;
+          }
+          return { ...item, tried, hints };
+        });
+        return [...updated, { ...row, n: updated.length + 1 }];
+      });
+      setSelected(null);
+      setHint(null);
+      setStuckDismissed(false);
+      setWinRecorded(Boolean(next.won));
+      setState({
+        ...next,
+        finishedAt: next.won ? next.finishedAt ?? Date.now() : null,
+      });
+      playSfx(
+        step === "draw"
+          ? before.stock.length === 0
+            ? "flip"
+            : "draw"
+          : "place",
+      );
+      return true;
+    },
+    [log, state],
+  );
+  handleBranchRef.current = handleBranch;
 
   const handleUndo = useCallback(() => {
     setAutoplay(false);
@@ -368,23 +563,78 @@ export function Game() {
     setAutoplay((on) => {
       if (on) return false;
       if (isStuck(state)) {
+        if (search) {
+          const fork = findDfsBranch(log, pathRef.current, state);
+          if (fork) {
+            return handleBranch(fork.path, fork.move, fork.label, {
+              keepAuto: true,
+              actor: "autoplay",
+            });
+          }
+          showToast("No winning path");
+          playSfx("illegal");
+          return false;
+        }
         showToast("No Move Available");
         playSfx("illegal");
         return false;
       }
       return true;
     });
-  }, [busy, showToast, state]);
+  }, [busy, handleBranch, log, search, showToast, state]);
 
   useEffect(() => {
     if (!autoplay) return;
     let cancelled = false;
     let delayId = 0;
+    let forking = false;
     const seen = new Set<string>([positionKey(stateRef.current)]);
 
     const stop = (exhausted = false) => {
-      if (cancelled) return;
+      if (cancelled || forking) return;
+      forking = true;
       const current = stateRef.current;
+      if (exhausted && searchRef.current && !current.won) {
+        if (maxPathId(logRef.current) >= 80) {
+          setAutoplay(false);
+          setHint(null);
+          showToast("Search limit reached");
+          setState((s) =>
+            s.won || s.finishedAt ? s : { ...s, finishedAt: Date.now() },
+          );
+          forking = false;
+          return;
+        }
+        const skip = new Set<string>();
+        for (let n = 0; n < 40; n++) {
+          const fork = findDfsBranch(
+            logRef.current,
+            pathRef.current,
+            current,
+            seen,
+            skip,
+          );
+          if (!fork) break;
+          skip.add(`${fork.path}:${fork.move}:${fork.label}`);
+          const ok = handleBranchRef.current(fork.path, fork.move, fork.label, {
+            keepAuto: true,
+            actor: "autoplay",
+          });
+          if (ok) {
+            seen.add(positionKey(stateRef.current));
+            forking = false;
+            return;
+          }
+        }
+        setAutoplay(false);
+        setHint(null);
+        showToast("No winning path");
+        setState((s) =>
+          s.won || s.finishedAt ? s : { ...s, finishedAt: Date.now() },
+        );
+        forking = false;
+        return;
+      }
       setAutoplay(false);
       setHint(null);
       if (exhausted && isStuck(current)) {
@@ -392,6 +642,7 @@ export function Game() {
           s.won || s.finishedAt ? s : { ...s, finishedAt: Date.now() },
         );
       }
+      forking = false;
     };
 
     const execute = () => {
@@ -399,14 +650,14 @@ export function Game() {
       const current = stateRef.current;
       const step = findAutoplayStep(current, seen);
       if (!step) {
-        stop(isStuck(current));
+        stop(Boolean(searchRef.current) || isStuck(current));
         return;
       }
       const label = describeAction(current, step);
       if (step === "draw") {
         const next = draw(current);
         if (!next) {
-          stop(isStuck(current));
+          stop(Boolean(searchRef.current) || isStuck(current));
           return;
         }
         commitRef.current(next, current.stock.length === 0 ? "flip" : "draw", {
@@ -414,33 +665,42 @@ export function Game() {
           action: current.stock.length === 0 ? "redeal" : "draw",
           label,
           hints: hintsForAction(current, step),
+          step,
         });
-        if (next.won) stop();
+        if (next.won) {
+          if (searchRef.current) showToast("Winning path found");
+          stop();
+        }
         else if (isStuck(next)) stop(true);
         return;
       }
-      const next = tryMove(current, step.from, step.to);
+      const next = applyStep(current, step);
       if (!next) {
-        stop(isStuck(current));
+        stop(Boolean(searchRef.current) || isStuck(current));
         return;
       }
       const key = positionKey(next);
       if (seen.has(key)) {
-        stop(isStuck(current));
+        stop(Boolean(searchRef.current) || isStuck(current));
         return;
       }
       seen.add(key);
+      const head = isComboStep(step) ? step.combo[1] : step;
       const under =
-        step.from.pile === "tableau"
-          ? current.tableau[step.from.index]![step.from.cardIndex - 1]
+        head.from.pile === "tableau"
+          ? current.tableau[head.from.index]![head.from.cardIndex - 1]
           : undefined;
-      commitRef.current(next, under && !under.faceUp ? "flip" : "place", {
+      commitRef.current(next, under && !under.faceUp || isComboStep(step) ? "flip" : "place", {
         actor: "autoplay",
         action: "move",
         label,
         hints: hintsForAction(current, step),
+        step,
       });
-      if (next.won) stop();
+      if (next.won) {
+        if (searchRef.current) showToast("Winning path found");
+        stop();
+      }
       else if (isStuck(next)) stop(true);
     };
 
@@ -458,10 +718,12 @@ export function Game() {
       }
       const step = findAutoplayStep(current, seen);
       if (!step) {
-        stop(isStuck(current));
+        stop(Boolean(searchRef.current) || isStuck(current));
         return;
       }
-      setHint(step);
+      setHint(
+        step === "draw" || !isComboStep(step) ? step : step.combo[0],
+      );
       delayId = window.setTimeout(execute, 280);
     };
 
@@ -555,6 +817,7 @@ export function Game() {
         canUndo={history.length > 0 && !state.won && !autoplay}
         canComplete={finishable && !busy && !autoplay}
         autoplay={autoplay}
+        search={search}
         sound={settings.sound}
         drawCount={settings.drawCount}
         onNew={() => requestNew()}
@@ -562,6 +825,10 @@ export function Game() {
         onHint={handleHint}
         onComplete={() => void runComplete()}
         onToggleAutoplay={toggleAutoplay}
+        onSearch={(on) => {
+          unlockAudio();
+          setSearch(on);
+        }}
         onToggleSound={() => {
           unlockAudio();
           setSettings((s) => {
@@ -578,6 +845,15 @@ export function Game() {
         onLog={() => setShowLog(true)}
       />
       <main className="table-main">
+        {search && autoplay ? (
+          <SearchTree
+            log={log}
+            path={maxPathId(log)}
+            seed={state.seed}
+            drawCount={state.drawCount}
+            dealId={state.dealId}
+          />
+        ) : null}
         <div ref={boardRef} className="h-full w-full">
         <Board
           state={state}
@@ -627,10 +903,14 @@ export function Game() {
       ) : showStuck ? (
         <StuckOverlay
           canUndo={history.length > 0}
+          log={log}
+          leftover={listDecisionBranches(state)}
+          path={maxPathId(log)}
           onUndo={handleUndo}
           onNew={() => dealNew(settings.drawCount)}
           onLog={() => setShowLog(true)}
           onClose={() => setStuckDismissed(true)}
+          onBranch={handleBranch}
         />
       ) : null}
       {showLog ? (

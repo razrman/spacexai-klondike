@@ -1,7 +1,9 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { Landing } from "@/components/solitaire/Landing";
+import { Landing } from "../components/solitaire/Landing";
 
-export const Route = createFileRoute("/")({ component: Home });
+export const Route = createFileRoute("/")({
+  component: Home,
+});
 
 function Home() {
   return <Landing />;

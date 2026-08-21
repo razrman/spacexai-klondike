@@ -19,6 +19,7 @@ export function Hud({
   canUndo,
   canComplete,
   autoplay,
+  search,
   sound,
   drawCount,
   onNew,
@@ -26,6 +27,7 @@ export function Hud({
   onHint,
   onComplete,
   onToggleAutoplay,
+  onSearch,
   onToggleSound,
   onDrawCount,
   onHelp,
@@ -37,6 +39,7 @@ export function Hud({
   canUndo: boolean;
   canComplete: boolean;
   autoplay: boolean;
+  search: boolean;
   sound: boolean;
   drawCount: 1 | 3;
   onNew: () => void;
@@ -44,6 +47,7 @@ export function Hud({
   onHint: () => void;
   onComplete: () => void;
   onToggleAutoplay: () => void;
+  onSearch: (on: boolean) => void;
   onToggleSound: () => void;
   onDrawCount: (n: 1 | 3) => void;
   onHelp: () => void;
@@ -105,6 +109,28 @@ export function Hud({
           )}
           Auto
         </Button>
+        <div className="dfs-switch">
+          <span>DFS</span>
+          <div className="draw-toggle" role="group" aria-label="DFS search">
+            <button
+              type="button"
+              className={cn(!search && "is-active")}
+              aria-pressed={!search}
+              onClick={() => onSearch(false)}
+            >
+              Off
+            </button>
+            <button
+              type="button"
+              className={cn(search && "is-active")}
+              aria-pressed={search}
+              title="Depth-first search of every untried branch"
+              onClick={() => onSearch(true)}
+            >
+              On
+            </button>
+          </div>
+        </div>
         {canComplete ? (
           <Button variant="subtle" size="sm" onClick={onComplete}>
             Finish

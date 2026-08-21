@@ -6,6 +6,7 @@ import {
   type MoveLogEntry,
   type Stats,
 } from "@/lib/solitaire/types";
+import type { DecisionBranch } from "@/lib/solitaire/engine";
 import { cn } from "@/lib/utils";
 
 export function WinOverlay({
@@ -126,17 +127,26 @@ function Stat({ label, value }: { label: string; value: string | number }) {
 
 export function StuckOverlay({
   canUndo,
+  log,
+  leftover,
+  path,
   onUndo,
   onNew,
   onLog,
   onClose,
+  onBranch,
 }: {
   canUndo: boolean;
+  log: MoveLogEntry[];
+  leftover: DecisionBranch[];
+  path: number;
   onUndo: () => void;
   onNew: () => void;
   onLog: () => void;
   onClose: () => void;
+  onBranch: (path: number, move: number, label: string) => void;
 }) {
+  const tree = buildDecisionTree(log, leftover, path);
   return (
     <div
       className="overlay"
@@ -146,7 +156,7 @@ export function StuckOverlay({
         if (event.target === event.currentTarget) onClose();
       }}
     >
-      <div className="overlay-card relative max-w-sm">
+      <div className="overlay-card stuck-card relative">
         <Button
           variant="ghost"
           size="icon-sm"
@@ -164,10 +174,11 @@ export function StuckOverlay({
           No Move Available
         </h2>
         <p className="mt-3 text-sm leading-relaxed text-cream/75">
-          Autoplay has nothing left. Close this and keep moving cards or
-          flipping the stock by hand.
+          Autoplay has nothing left. Starred plays were tried. Click another
+          choice to start a new path; earlier paths stay in the log.
         </p>
-        <div className="mt-6 flex gap-3">
+        <DecisionList rows={tree} onBranch={onBranch} />
+        <div className="mt-5 flex gap-3">
           <Button className="flex-1" onClick={onClose}>
             Keep playing
           </Button>
@@ -189,6 +200,170 @@ export function StuckOverlay({
           </Button>
         </div>
       </div>
+    </div>
+  );
+}
+
+type Choice = {
+  id: string;
+  tag: string;
+  label: string;
+  tried: boolean;
+  path: number;
+  move: number;
+};
+
+type DecisionRow = {
+  key: string;
+  choices: Choice[];
+};
+
+function isFlipLabel(label: string): boolean {
+  return /^(Draw \d+|Redeal stock)$/i.test(label.trim());
+}
+
+function padMove(n: number): string {
+  return String(Math.max(0, n)).padStart(2, "0");
+}
+
+function choiceTag(path: number, move: number, choice: number): string {
+  return `P${path} M${padMove(move)} C${choice}:`;
+}
+
+function parseHintOptions(
+  row: MoveLogEntry,
+): { label: string; tried: boolean }[] {
+  const raw =
+    row.hints && row.hints.length > 0 ? row.hints : [`* ${row.label}`];
+  const live = row.label.replace(/^\*\s*/, "").trim();
+  const tried = new Set<string>();
+  const addTried = (value?: string) => {
+    const text = value?.replace(/^\*\s*/, "").trim();
+    if (text) tried.add(text);
+  };
+  addTried(live);
+  row.tried?.forEach(addTried);
+  const map = new Map<string, true>();
+  for (const hint of raw) {
+    const text = hint.replace(/^\*\s*/, "").trim();
+    if (!text) continue;
+    if (hint.startsWith("*")) tried.add(text);
+    map.set(text, true);
+  }
+  for (const text of tried) map.set(text, true);
+  return [...map.keys()].map((label) => ({
+    label,
+    tried: tried.has(label),
+  }));
+}
+
+function firstMoveOnPath(log: MoveLogEntry[], path: number): number | null {
+  let min: number | null = null;
+  for (const row of log) {
+    if (row.action === "undo" || (row.path ?? 1) !== path) continue;
+    const move = row.move ?? row.n;
+    if (min === null || move < min) min = move;
+  }
+  return min;
+}
+
+function buildDecisionTree(
+  log: MoveLogEntry[],
+  leftover: DecisionBranch[],
+  currentPath: number,
+): DecisionRow[] {
+  const plays = log.filter((row) => row.action !== "undo");
+  const rows: DecisionRow[] = [];
+  const seen = new Set<string>();
+  for (const row of plays) {
+    const path = row.path ?? 1;
+    const move = row.move ?? row.n;
+    const key = `${path}-${move}`;
+    if (seen.has(key)) continue;
+    if (row.parentPath && firstMoveOnPath(plays, path) === move) continue;
+    const options = parseHintOptions(row).filter(
+      (item) => !isFlipLabel(item.label),
+    );
+    const choseFlip =
+      row.action === "draw" ||
+      row.action === "redeal" ||
+      isFlipLabel(row.label);
+    if (choseFlip || options.length <= 1) continue;
+    seen.add(key);
+    rows.push({
+      key,
+      choices: options.map((item, i) => ({
+        id: `${key}-${i}-${item.label}`,
+        tag: choiceTag(path, move, i + 1),
+        label: item.label,
+        tried: item.tried,
+        path,
+        move,
+      })),
+    });
+  }
+  const rest = leftover.filter((branch) => !isFlipLabel(branch.label));
+  if (rest.length > 1) {
+    const last = plays
+      .filter((row) => (row.path ?? 1) === currentPath)
+      .reduce((max, row) => Math.max(max, row.move ?? row.n), 0);
+    const move = last + 1;
+    rows.push({
+      key: `${currentPath}-end`,
+      choices: rest.map((branch, i) => ({
+        id: `end-${i}-${branch.label}`,
+        tag: choiceTag(currentPath, move, i + 1),
+        label: branch.label,
+        tried: false,
+        path: currentPath,
+        move: -1,
+      })),
+    });
+  }
+  return rows;
+}
+
+function DecisionList({
+  rows,
+  onBranch,
+}: {
+  rows: DecisionRow[];
+  onBranch: (path: number, move: number, label: string) => void;
+}) {
+  return (
+    <div className="d-tree">
+      <p className="d-tree-kicker">Decisions</p>
+      {rows.length === 0 ? (
+        <p className="text-sm text-cream/60">No branches — every ply had a single play.</p>
+      ) : (
+        <ol className="d-rows">
+          {rows.map((row) => (
+            <li key={row.key} className="d-row">
+              {row.choices.map((choice) =>
+                choice.tried ? (
+                  <span key={choice.id} className="d-branch is-chosen">
+                    <span className="d-code">{choice.tag}</span>
+                    <span className="d-mark">*</span>
+                    <span>{choice.label}</span>
+                  </span>
+                ) : (
+                  <button
+                    key={choice.id}
+                    type="button"
+                    className="d-branch is-alt"
+                    onClick={() =>
+                      onBranch(choice.path, choice.move, choice.label)
+                    }
+                  >
+                    <span className="d-code">{choice.tag}</span>
+                    <span>{choice.label}</span>
+                  </button>
+                ),
+              )}
+            </li>
+          ))}
+        </ol>
+      )}
     </div>
   );
 }
@@ -238,7 +413,9 @@ function formatLogText(current: MoveLogEntry[], past: DealLog[]): string {
   lines.push("Current deal");
   if (current.length === 0) lines.push("(no moves yet)");
   for (const row of current) {
-    lines.push(`${row.n}. [${row.actor}] ${row.label}`);
+    lines.push(
+      `${choiceTag(row.path ?? 1, row.move ?? row.n, row.choice ?? 1)} [${row.actor}] ${row.label}`,
+    );
     if (row.hints?.length) lines.push(`   ${row.hints.join("  ·  ")}`);
   }
   for (const deal of past) {
@@ -248,7 +425,9 @@ function formatLogText(current: MoveLogEntry[], past: DealLog[]): string {
       `Deal ${deal.dealId} · seed ${deal.seed} · draw ${deal.drawCount} · ${deal.moves} moves · ${result}`,
     );
     for (const row of deal.entries) {
-      lines.push(`${row.n}. [${row.actor}] ${row.label}`);
+      lines.push(
+      `${choiceTag(row.path ?? 1, row.move ?? row.n, row.choice ?? 1)} [${row.actor}] ${row.label}`,
+    );
       if (row.hints?.length) lines.push(`   ${row.hints.join("  ·  ")}`);
     }
   }
@@ -328,7 +507,9 @@ function LogTable({
       {rows.map((row) => (
         <li key={`${row.n}-${row.at}`} className="log-item">
           <div className="log-row">
-            <span className="log-n">{row.n}</span>
+            <span className="log-n">
+              {choiceTag(row.path ?? 1, row.move ?? row.n, row.choice ?? 1)}
+            </span>
             <span className={cn("log-who", row.actor === "autoplay" && "is-auto")}>
               {row.actor === "autoplay" ? "Auto" : "Manual"}
             </span>

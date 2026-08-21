@@ -1,7 +1,9 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { Game } from "@/components/solitaire/Game";
+import { Game } from "../components/solitaire/Game";
 
-export const Route = createFileRoute("/play")({ component: Play });
+export const Route = createFileRoute("/play")({
+  component: Play,
+});
 
 function Play() {
   return <Game />;

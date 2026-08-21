@@ -1,12 +1,18 @@
 import {
   type Card,
+  type ComboStep,
   type Dest,
   type GameState,
+  type LogStep,
   type Move,
+  type MoveLogEntry,
+  type MoveStep,
   type Rank,
   type Source,
   type Suit,
   FOUNDATION_SUITS,
+  isComboStep,
+  isMoveStep,
   isRed,
   RANK_LABEL,
   RANKS,
@@ -485,7 +491,7 @@ function exposesPlayableVisible(state: GameState, move: Move): boolean {
   if (!next) return false;
   const exposed = topOf(next.tableau[move.from.index]!);
   if (!exposed || exposed.id !== under.id) return false;
-  return cardIsPlayable(next, exposed, move.from.index);
+  return canGoToFoundation(next, exposed);
 }
 
 function isTableauKingToEmpty(state: GameState, move: Move): boolean {
@@ -545,6 +551,107 @@ function kingMoveUnhides(state: GameState, from: Source): boolean {
     .some((card) => !card.faceUp);
 }
 
+/** Face-down card would flip if this tableau pack is moved. */
+function stackUnhidesHidden(state: GameState, move: Move): boolean {
+  if (move.from.pile !== "tableau" || move.to.pile !== "tableau") return false;
+  if (move.from.cardIndex <= 0) return false;
+  const under = state.tableau[move.from.index]![move.from.cardIndex - 1];
+  return Boolean(under && !under.faceUp);
+}
+
+/** After a setup onto destCol, a pack can land there and flip a hidden card. */
+function followUpUnhides(state: GameState, destCol: number): boolean {
+  return listLegalMoves(state).some((step) => {
+    if (step.from.pile !== "tableau" || step.to.pile !== "tableau") return false;
+    if (step.to.index !== destCol) return false;
+    return stackUnhidesHidden(state, step) || exposesPlayableVisible(state, step);
+  });
+}
+
+/** Foundation → tableau only as the first half of: land a pack on it, then unhide. */
+function foundationPullHelps(state: GameState, move: Move): boolean {
+  if (move.from.pile !== "foundation" || move.to.pile !== "tableau") return false;
+  const next = tryMove(state, move.from, move.to);
+  if (!next) return false;
+  return followUpUnhides(next, move.to.index);
+}
+
+const COMBO_SEP = " then ";
+
+export function listUnhideCombos(
+  state: GameState,
+  ): { label: string; step: { combo: [MoveStep, MoveStep] } }[] {
+  const out: { label: string; step: { combo: [MoveStep, MoveStep] } }[] = [];
+  const seen = new Set<string>();
+  const add = (first: MoveStep, second: MoveStep) => {
+    const step = { combo: [first, second] as [MoveStep, MoveStep] };
+    const label = describeAction(state, step);
+    if (!label || seen.has(label)) return;
+    seen.add(label);
+    out.push({ label, step });
+  };
+
+  for (const pull of listLegalMoves(state)) {
+    if (pull.from.pile !== "foundation" || pull.to.pile !== "tableau") continue;
+    const mid = tryMove(state, pull.from, pull.to);
+    if (!mid) continue;
+    for (const follow of listLegalMoves(mid)) {
+      if (follow.from.pile !== "tableau" || follow.to.pile !== "tableau") continue;
+      if (follow.to.index !== pull.to.index) continue;
+      if (
+        !stackUnhidesHidden(mid, follow) &&
+        !exposesPlayableVisible(mid, follow)
+      ) {
+        continue;
+      }
+      add(
+        { from: pull.from, to: pull.to },
+        { from: follow.from, to: follow.to },
+      );
+    }
+  }
+
+  for (const shift of listLegalMoves(state)) {
+    if (shift.from.pile !== "tableau" || shift.to.pile !== "tableau") continue;
+    if (!exposesPlayableVisible(state, shift)) continue;
+    const mid = tryMove(state, shift.from, shift.to);
+    if (!mid) continue;
+    const col = shift.from.index;
+    const pile = mid.tableau[col] ?? [];
+    const topIndex = pile.length - 1;
+    if (topIndex < 0) continue;
+    for (const follow of listLegalMoves(mid)) {
+      if (follow.from.pile !== "tableau" || follow.to.pile !== "foundation") {
+        continue;
+      }
+      if (follow.from.index !== col) continue;
+      if (follow.from.cardIndex !== topIndex) continue;
+      add(
+        { from: shift.from, to: shift.to },
+        { from: follow.from, to: follow.to },
+      );
+    }
+  }
+  return out;
+}
+
+function comboSetupLabels(state: GameState): Set<string> {
+  const labels = new Set<string>();
+  for (const combo of listUnhideCombos(state)) {
+    labels.add(describeAction(state, combo.step.combo[0]));
+  }
+  return labels;
+}
+
+/** Don't ship a card to foundation if a pack can land on it and unhide. */
+function holdsForIncomingUnhide(state: GameState, move: Move): boolean {
+  if (move.to.pile !== "foundation") return false;
+  if (move.from.pile !== "tableau") return false;
+  const pile = state.tableau[move.from.index] ?? [];
+  if (move.from.cardIndex !== pile.length - 1) return false;
+  return followUpUnhides(state, move.from.index);
+}
+
 function isWasteLanding(state: GameState, from: Source): boolean {
   const cards = getSourceCards(state, from);
   if (!cards || cards.length !== 1) return false;
@@ -552,30 +659,28 @@ function isWasteLanding(state: GameState, from: Source): boolean {
   return Boolean(waste && canPlaceOnTableau(waste, cards[0]!));
 }
 
-function foundationUnblocks(state: GameState, move: Move): boolean {
-  const next = tryMove(state, move.from, move.to);
-  if (!next) return false;
-  const destCol = move.to.pile === "tableau" ? move.to.index : -1;
-  if (destCol < 0) return false;
-  return listLegalMoves(next).some((step) => {
-    if (step.from.pile !== "tableau") return false;
-    if (step.to.pile !== "tableau" || step.to.index !== destCol) return false;
-    return exposesPlayableVisible(next, step);
-  });
-}
-
 function consolidatesTableau(state: GameState, move: Move): boolean {
   if (move.from.pile !== "tableau" || move.to.pile !== "tableau") return false;
   if (isKingStackWithoutHidden(state, move)) return false;
   if ((state.tableau[move.to.index] ?? []).length === 0) return false;
-  if (move.kind === "reveal") return true;
   if (move.from.cardIndex !== 0) return false;
   const next = tryMove(state, move.from, move.to);
   if (!next) return false;
-  return (next.tableau[move.from.index] ?? []).length === 0;
+  if ((next.tableau[move.from.index] ?? []).length !== 0) return false;
+  return listKingToEmpty(next).length > 0;
+}
+
+function isSearchMove(state: GameState, move: Move): boolean {
+  if (move.from.pile === "foundation") return false;
+  if (move.to.pile === "tableau" && isKingStackWithoutHidden(state, move)) {
+    return false;
+  }
+  if (move.to.pile === "foundation" || move.from.pile === "waste") return true;
+  return isAdvancingMove(state, move);
 }
 
 function isAdvancingMove(state: GameState, move: Move): boolean {
+  if (move.from.pile === "foundation") return false;
   if (isKingToEmpty(state, move)) return true;
   if (move.to.pile === "tableau" && isKingStackWithoutHidden(state, move)) {
     return false;
@@ -583,7 +688,6 @@ function isAdvancingMove(state: GameState, move: Move): boolean {
   if (move.kind === "foundation" || move.kind === "waste" || move.kind === "reveal") {
     return true;
   }
-  if (move.from.pile === "foundation") return foundationUnblocks(state, move);
   if (isTableauKingToEmpty(state, move)) return true;
   if (consolidatesTableau(state, move)) return true;
   return exposesPlayableVisible(state, move);
@@ -621,11 +725,25 @@ function pickAdvancing(
   return null;
 }
 
+function pickCombo(
+  state: GameState,
+  seen: Set<string> | null,
+): ComboStep | null {
+  for (const combo of listUnhideCombos(state)) {
+    const next = applyStep(state, combo.step);
+    if (!next) continue;
+    if (seen && seen.has(positionKey(next))) continue;
+    return combo.step;
+  }
+  return null;
+}
+
 function chooseAdvancing(
   state: GameState,
   seen: Set<string> | null,
-): { from: Source; to: Dest } | null {
+): Exclude<LogStep, "draw"> | null {
   const moves = listAdvancingMoves(state);
+  const setups = comboSetupLabels(state);
   const ace = pickAdvancing(state, moves, seen, (move) =>
     isAceToFoundation(state, move),
   );
@@ -646,12 +764,20 @@ function chooseAdvancing(
     isTopCardReveal(state, move),
   );
   if (uncover) return uncover;
+  const combo = pickCombo(state, seen);
+  if (combo) return combo;
   const order: Move["kind"][] = ["foundation", "reveal", "waste", "tableau"];
   for (const kind of order) {
     const hit = pickAdvancing(state, moves, seen, (move) => {
       if (move.kind !== kind) return false;
       if (kind === "reveal" && isTopCardReveal(state, move)) return false;
       if (kind === "foundation" && isWasteLanding(state, move.from)) return false;
+      if (kind === "foundation" && holdsForIncomingUnhide(state, move)) return false;
+      if (
+        setups.has(describeAction(state, { from: move.from, to: move.to }))
+      ) {
+        return false;
+      }
       return true;
     });
     if (hit) return hit;
@@ -663,7 +789,10 @@ export function findHint(
   state: GameState,
 ): { from: Source; to: Dest } | "draw" | null {
   const hit = chooseAdvancing(state, null);
-  if (hit) return hit;
+  if (hit) {
+    if (isComboStep(hit)) return hit.combo[0];
+    if (isMoveStep(hit)) return hit;
+  }
   if (canAdvanceByDrawing(state)) return "draw";
   return null;
 }
@@ -671,18 +800,20 @@ export function findHint(
 export function findAutoplayStep(
   state: GameState,
   seen: Set<string>,
-): { from: Source; to: Dest } | "draw" | null {
+): LogStep | null {
   const hit = chooseAdvancing(state, seen);
   if (hit) return hit;
   const leftover = listLegalMoves(state).filter((move) => {
-    if (isKingToEmpty(state, move)) return true;
-    if (move.from.pile === "foundation") return false;
-    if (move.to.pile === "tableau" && isKingStackWithoutHidden(state, move)) {
+    if (!isSearchMove(state, move)) return false;
+    if (holdsForIncomingUnhide(state, move)) return false;
+    if (
+      comboSetupLabels(state).has(
+        describeAction(state, { from: move.from, to: move.to }),
+      )
+    ) {
       return false;
     }
-    if (move.to.pile === "foundation" || move.from.pile === "waste") return true;
-    if (move.kind === "reveal") return true;
-    return exposesPlayableVisible(state, move) || consolidatesTableau(state, move);
+    return true;
   });
   for (const move of leftover) {
     const next = tryMove(state, move.from, move.to);
@@ -707,12 +838,20 @@ export function shortCard(card: Card): string {
 
 export function describeAction(
   state: GameState,
-  step: { from: Source; to: Dest } | "draw",
+  step: LogStep,
 ): string {
   if (step === "draw") {
     if (state.stock.length === 0) return "Redeal stock";
     const n = Math.min(state.drawCount, state.stock.length);
     return n === 1 ? "Draw 1" : `Draw ${n}`;
+  }
+  if (isComboStep(step)) {
+    const mid = tryMove(state, step.combo[0].from, step.combo[0].to);
+    const first = describeAction(state, step.combo[0]);
+    const second = mid
+      ? describeAction(mid, step.combo[1])
+      : "follow-up";
+    return `${first}${COMBO_SEP}${second}`;
   }
   const cards = getSourceCards(state, step.from);
   const head = cards?.[0];
@@ -733,16 +872,27 @@ export function describeAction(
 
 export function listHintLabels(state: GameState): string[] {
   const labels: string[] = [];
+  const seen = new Set<string>();
+  const add = (label: string) => {
+    if (!label || seen.has(label)) return;
+    seen.add(label);
+    labels.push(label);
+  };
+  for (const combo of listUnhideCombos(state)) add(combo.label);
+  const setups = comboSetupLabels(state);
   const order: Move["kind"][] = ["foundation", "reveal", "waste", "tableau"];
   const advancing = listAdvancingMoves(state);
   for (const kind of order) {
     for (const move of advancing) {
       if (move.kind !== kind) continue;
-      labels.push(describeAction(state, { from: move.from, to: move.to }));
+      if (move.from.pile === "foundation") continue;
+      const label = describeAction(state, { from: move.from, to: move.to });
+      if (setups.has(label)) continue;
+      add(label);
     }
   }
   if (canAdvanceByDrawing(state)) {
-    labels.push(describeAction(state, "draw"));
+    add(describeAction(state, "draw"));
   }
   return labels;
 }
@@ -762,11 +912,296 @@ export function annotateHints(hints: string[], chosen: string): string[] {
 
 export function hintsForAction(
   state: GameState,
-  step: { from: Source; to: Dest } | "draw" | string,
+  step: LogStep | string,
 ): string[] {
   const chosen =
     typeof step === "string" ? step : describeAction(state, step);
   return annotateHints(listHintLabels(state), chosen);
+}
+
+export type DecisionBranch = {
+  label: string;
+  lane: "auto" | "legal";
+};
+
+export function listDecisionBranches(state: GameState): DecisionBranch[] {
+  const seen = new Set<string>();
+  const out: DecisionBranch[] = [];
+  const add = (label: string, lane: DecisionBranch["lane"]) => {
+    if (!label || seen.has(label)) return;
+    seen.add(label);
+    out.push({ label, lane });
+  };
+  for (const label of listHintLabels(state)) add(label, "auto");
+  const step = findAutoplayStep(state, new Set());
+  if (step) add(describeAction(state, step), "auto");
+  for (const move of listLegalMoves(state)) {
+    add(describeAction(state, { from: move.from, to: move.to }), "legal");
+  }
+  return out;
+}
+
+export function effectivePlays(log: { action: string }[]): typeof log {
+  const stack: typeof log = [];
+  for (const row of log) {
+    if (row.action === "undo") stack.pop();
+    else stack.push(row);
+  }
+  return stack;
+}
+
+export function playsForPath(log: MoveLogEntry[], path: number): MoveLogEntry[] {
+  const byPath = new Map<number, MoveLogEntry[]>();
+  for (const row of log) {
+    if (row.action === "undo") continue;
+    const id = row.path ?? 1;
+    const list = byPath.get(id) ?? [];
+    list.push(row);
+    byPath.set(id, list);
+  }
+  const build = (id: number, seen: Set<number>): MoveLogEntry[] => {
+    if (seen.has(id)) return [];
+    seen.add(id);
+    const mine = (byPath.get(id) ?? [])
+      .slice()
+      .sort((a, b) => (a.move ?? a.n) - (b.move ?? b.n));
+    if (id === 1 || mine.length === 0) return mine;
+    const head = mine[0]!;
+    const parent = head.parentPath ?? 1;
+    const branchMove = head.move ?? head.n;
+    const prefix = build(parent, seen).filter(
+      (row) => (row.move ?? row.n) < branchMove,
+    );
+    return [...prefix, ...mine];
+  };
+  return build(path, new Set());
+}
+
+export function maxPathId(log: MoveLogEntry[]): number {
+  let max = 1;
+  for (const row of log) {
+    const id = row.path ?? 1;
+    if (id > max) max = id;
+  }
+  return max;
+}
+
+export function isFlipLabel(label: string): boolean {
+  return /^(Draw \d+|Redeal stock)$/i.test(label.replace(/^\*\s*/, "").trim());
+}
+
+function isFoundationFromLabel(label: string): boolean {
+  return /\s[♠♥♦♣]\s→\scol\s/u.test(label.replace(/^\*\s*/, "").trim());
+}
+
+export function listOpeningLabels(
+  seed: number,
+  drawCount: 1 | 3,
+  dealId?: number,
+): string[] {
+  return listCardPlayLabels(
+    createGame({ seed, drawCount, dealId }),
+  );
+}
+
+export function listCardPlayLabels(state: GameState): string[] {
+  const labels: string[] = [];
+  const seen = new Set<string>();
+  for (const combo of listUnhideCombos(state)) {
+    if (seen.has(combo.label)) continue;
+    seen.add(combo.label);
+    labels.push(combo.label);
+  }
+  const setups = comboSetupLabels(state);
+  for (const move of listLegalMoves(state)) {
+    if (move.from.pile === "foundation") continue;
+    const label = describeAction(state, { from: move.from, to: move.to });
+    if (!label || seen.has(label) || setups.has(label)) continue;
+    seen.add(label);
+    labels.push(label);
+  }
+  return labels;
+}
+
+export function decisionChoices(
+  row: MoveLogEntry,
+): { label: string; tried: boolean }[] {
+  const raw =
+    row.hints && row.hints.length > 0 ? row.hints : [`* ${row.label}`];
+  const live = row.label.replace(/^\*\s*/, "").trim();
+  const tried = new Set<string>();
+  const add = (value?: string) => {
+    const text = value?.replace(/^\*\s*/, "").trim();
+    if (text) tried.add(text);
+  };
+  add(live);
+  row.tried?.forEach(add);
+  const order: string[] = [];
+  const seen = new Set<string>();
+  const push = (value: string) => {
+    if (!value || seen.has(value) || isFlipLabel(value)) return;
+    seen.add(value);
+    order.push(value);
+  };
+  for (const hint of raw) {
+    const text = hint.replace(/^\*\s*/, "").trim();
+    if (hint.startsWith("*")) add(text);
+    push(text);
+  }
+  for (const text of tried) push(text);
+  return order.map((label) => ({ label, tried: tried.has(label) }));
+}
+
+export function findDfsBranch(
+  log: MoveLogEntry[],
+  currentPath: number,
+  state: GameState,
+  seen: Set<string> = new Set(),
+  ignore: Set<string> = new Set(),
+): { path: number; move: number; label: string } | null {
+  const origin = createGame({
+    seed: state.seed,
+    drawCount: state.drawCount,
+    dealId: state.dealId,
+  });
+  const triedOf = (row: MoveLogEntry | null): Set<string> => {
+    const tried = new Set<string>();
+    if (!row) return tried;
+    const add = (value?: string) => {
+      const text = value?.replace(/^\*\s*/, "").trim();
+      if (text) tried.add(text);
+    };
+    add(row.label);
+    row.tried?.forEach(add);
+    row.hints?.forEach((hint) => {
+      if (hint.startsWith("*")) add(hint);
+    });
+    return tried;
+  };
+  const pick = (
+    before: GameState,
+    row: MoveLogEntry | null,
+    path: number,
+    ply: number,
+  ): { path: number; move: number; label: string } | null => {
+    const tried = triedOf(row);
+    for (const combo of listUnhideCombos(before)) {
+      if (tried.has(combo.label)) continue;
+      if (ignore.has(`${path}:${ply}:${combo.label}`)) continue;
+      const next = applyStep(before, combo.step);
+      if (!next || seen.has(positionKey(next))) continue;
+      return { path, move: ply, label: combo.label };
+    }
+    const setups = comboSetupLabels(before);
+    for (const step of listLegalMoves(before)) {
+      if (!isSearchMove(before, step)) continue;
+      const label = describeAction(before, { from: step.from, to: step.to });
+      if (!label || tried.has(label) || setups.has(label)) continue;
+      if (ignore.has(`${path}:${ply}:${label}`)) continue;
+      const next = tryMove(before, step.from, step.to);
+      if (!next || seen.has(positionKey(next))) continue;
+      return { path, move: ply, label };
+    }
+    return null;
+  };
+  const scan = (path: number) => {
+    const lineage = playsForPath(log, path);
+    const states: GameState[] = [origin];
+    let cursor = origin;
+    for (let i = 0; i < lineage.length; i++) {
+      const row = lineage[i]!;
+      const step = row.step ?? stepFromLabel(cursor, row.label);
+      const next = step ? applyStep(cursor, step) : null;
+      if (!next) break;
+      states.push(next);
+      cursor = next;
+    }
+    for (let i = Math.min(lineage.length, states.length - 1) - 1; i >= 0; i--) {
+      const row = lineage[i]!;
+      const hit = pick(states[i]!, row, row.path ?? 1, row.move ?? row.n);
+      if (hit) return hit;
+    }
+    return null;
+  };
+  const current = scan(currentPath);
+  if (current) return current;
+  for (let path = maxPathId(log); path >= 1; path--) {
+    if (path === currentPath) continue;
+    const hit = scan(path);
+    if (hit) return hit;
+  }
+  const leftover = pick(state, null, currentPath, -1);
+  if (leftover) {
+    const step = stepFromLabel(state, leftover.label);
+    if (step) {
+      const next = applyStep(state, step);
+      if (next && !seen.has(positionKey(next))) return leftover;
+    }
+  }
+  return null;
+}
+
+export function stepFromLabel(
+  state: GameState,
+  label: string,
+): LogStep | null {
+  const want = label.replace(/^\*\s*/, "").replace(/\s*\(finish\)$/, "").trim();
+  if (!want) return null;
+  if (/^(Draw \d+|Redeal stock)$/i.test(want)) {
+    const next = draw(state);
+    return next ? "draw" : null;
+  }
+  const split = want.indexOf(COMBO_SEP);
+  if (split > 0) {
+    const first = stepFromLabel(state, want.slice(0, split).trim());
+    if (!first || first === "draw" || isComboStep(first)) return null;
+    const mid = tryMove(state, first.from, first.to);
+    if (!mid) return null;
+    const second = stepFromLabel(mid, want.slice(split + COMBO_SEP.length).trim());
+    if (!second || second === "draw" || isComboStep(second)) return null;
+    return { combo: [first, second] };
+  }
+  for (const combo of listUnhideCombos(state)) {
+    if (combo.label === want) return combo.step;
+  }
+  for (const move of listLegalMoves(state)) {
+    const text = describeAction(state, { from: move.from, to: move.to });
+    if (text === want) return { from: move.from, to: move.to };
+  }
+  const flip = describeAction(state, "draw");
+  if (flip === want && draw(state)) return "draw";
+  return null;
+}
+
+export function applyStep(
+  state: GameState,
+  step: LogStep,
+): GameState | null {
+  if (step === "draw") return draw(state);
+  if (isComboStep(step)) {
+    let cursor: GameState | null = state;
+    for (const part of step.combo) {
+      cursor = tryMove(cursor, part.from, part.to);
+      if (!cursor) return null;
+    }
+    return cursor;
+  }
+  return tryMove(state, step.from, step.to);
+}
+
+export function replayDeal(
+  origin: GameState,
+  plays: { step?: LogStep; label: string }[],
+): GameState | null {
+  let cursor = origin;
+  for (const play of plays) {
+    const step = play.step ?? stepFromLabel(cursor, play.label);
+    if (!step) return null;
+    const next = applyStep(cursor, step);
+    if (!next) return null;
+    cursor = next;
+  }
+  return cursor;
 }
 
 export function positionKey(state: GameState): string {
