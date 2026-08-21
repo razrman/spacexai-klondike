@@ -83,7 +83,7 @@ export function createGame(opts?: {
   dealId?: number;
 }): GameState {
   const seed = opts?.seed ?? (Math.floor(Math.random() * 0xffffffff) || 1);
-  const drawCount = opts?.drawCount ?? 1;
+  const drawCount = opts?.drawCount ?? 3;
   const rng = mulberry32(seed);
   const deck = shuffle(makeDeck(), rng);
 
@@ -111,6 +111,7 @@ export function createGame(opts?: {
     sessionCounted: false,
     dealId: opts?.dealId ?? seed,
     stockPasses: 0,
+    wasteFan: 0,
   };
 }
 
@@ -147,7 +148,11 @@ export function normalizeFoundations(state: GameState): GameState {
     if (index < 0 || next[index]!.length > 0) continue;
     next[index] = pile.map(cloneCard);
   }
-  return { ...state, foundations: next };
+  const wasteFan = Math.max(
+    0,
+    Math.min(state.wasteFan ?? Math.min(3, state.waste.length), state.waste.length),
+  );
+  return { ...state, foundations: next, wasteFan };
 }
 
 function isValidRun(cards: Card[]): boolean {
@@ -195,6 +200,7 @@ function removeFromSource(state: GameState, from: Source, count: number): GameSt
   const next = cloneState(state);
   if (from.pile === "waste") {
     next.waste.splice(next.waste.length - count, count);
+    next.wasteFan = Math.max(0, (state.wasteFan ?? 0) - count);
     return next;
   }
   if (from.pile === "foundation") {
@@ -274,7 +280,7 @@ export function tryMove(
   from: Source,
   to: Dest,
 ): GameState | null {
-  if (state.won || state.finishedAt) return null;
+  if (state.won) return null;
   if (samePile(from, to)) return null;
   const cards = getSourceCards(state, from);
   if (!cards) return null;
@@ -305,8 +311,11 @@ export function tryMove(
   return markWin(next);
 }
 
-export function draw(state: GameState): GameState | null {
-  if (state.won || state.finishedAt) return null;
+export function draw(
+  state: GameState,
+  opts?: { ignorePassLimit?: boolean },
+): GameState | null {
+  if (state.won) return null;
   if (state.stock.length === 0 && state.waste.length === 0) return null;
 
   const passes = state.stockPasses ?? 0;
@@ -314,13 +323,16 @@ export function draw(state: GameState): GameState | null {
   next = { ...next, moves: next.moves + 1, sessionCounted: true };
 
   if (next.stock.length === 0) {
-    if (next.drawCount === 3 && passes >= 2) return null;
+    if (!opts?.ignorePassLimit) {
+      if (next.drawCount === 1) return null;
+      if (passes >= 2) return null;
+    }
     const recycled = next.waste
       .map((card) => ({ ...card, faceUp: false }))
       .reverse();
-    const penalty = next.drawCount === 1 ? -100 : -20;
+    const penalty = -20;
     next = addScore(
-      { ...next, stock: recycled, waste: [] },
+      { ...next, stock: recycled, waste: [], wasteFan: 0 },
       penalty,
     );
     return next;
@@ -335,7 +347,13 @@ export function draw(state: GameState): GameState | null {
     drawn.push({ ...card, faceUp: true });
   }
   const stockPasses = stock.length === 0 ? passes + 1 : passes;
-  return { ...next, stock, waste: [...next.waste, ...drawn], stockPasses };
+  return {
+    ...next,
+    stock,
+    waste: [...next.waste, ...drawn],
+    stockPasses,
+    wasteFan: drawn.length,
+  };
 }
 
 export function findAutoMove(state: GameState, from: Source): Dest | null {
@@ -428,16 +446,46 @@ function canGoToFoundation(state: GameState, card: Card): boolean {
   return false;
 }
 
-/** Tableau-to-tableau only counts if it exposes a card that can go up. */
-function exposesFoundationCard(state: GameState, move: Move): boolean {
+function cardIsPlayable(state: GameState, card: Card, skipCol: number): boolean {
+  if (canGoToFoundation(state, card)) return true;
+  const home = state.tableau[skipCol] ?? [];
+  const homeIndex = home.findIndex((item) => item.id === card.id);
+  const kingCoversHidden =
+    card.rank === 13 &&
+    homeIndex > 0 &&
+    home.slice(0, homeIndex).some((item) => !item.faceUp);
+  for (let i = 0; i < 7; i++) {
+    if (i === skipCol) continue;
+    const dest = topOf(state.tableau[i]!);
+    if (!dest) {
+      if (kingCoversHidden) return true;
+      continue;
+    }
+    if (canPlaceOnTableau(card, dest)) return true;
+  }
+  return false;
+}
+
+function isKingStackWithoutHidden(state: GameState, move: Move): boolean {
   if (move.from.pile !== "tableau") return false;
+  const cards = getSourceCards(state, move.from);
+  if (!cards?.[0] || cards[0].rank !== 13) return false;
+  if (move.from.cardIndex <= 0) return true;
+  const under = state.tableau[move.from.index]![move.from.cardIndex - 1];
+  return !under || under.faceUp;
+}
+
+/** Substack move only if the face-up card it uncovers has a play. */
+function exposesPlayableVisible(state: GameState, move: Move): boolean {
+  if (move.from.pile !== "tableau" || move.to.pile !== "tableau") return false;
+  if (move.from.cardIndex <= 0) return false;
+  const under = state.tableau[move.from.index]![move.from.cardIndex - 1];
+  if (!under?.faceUp) return false;
   const next = tryMove(state, move.from, move.to);
   if (!next) return false;
   const exposed = topOf(next.tableau[move.from.index]!);
-  if (!exposed?.faceUp) return false;
-  const beforeTop = topOf(state.tableau[move.from.index]!);
-  if (beforeTop && beforeTop.id === exposed.id) return false;
-  return canGoToFoundation(next, exposed);
+  if (!exposed || exposed.id !== under.id) return false;
+  return cardIsPlayable(next, exposed, move.from.index);
 }
 
 function isTableauKingToEmpty(state: GameState, move: Move): boolean {
@@ -445,7 +493,56 @@ function isTableauKingToEmpty(state: GameState, move: Move): boolean {
   if ((state.tableau[move.to.index] ?? []).length !== 0) return false;
   const cards = getSourceCards(state, move.from);
   if (!cards?.[0] || cards[0].rank !== 13) return false;
-  return move.from.cardIndex > 0;
+  const pile = state.tableau[move.from.index] ?? [];
+  return pile.slice(0, move.from.cardIndex).some((card) => !card.faceUp);
+}
+
+function isKingToEmpty(state: GameState, move: Move): boolean {
+  if (move.to.pile !== "tableau") return false;
+  if ((state.tableau[move.to.index] ?? []).length !== 0) return false;
+  const cards = getSourceCards(state, move.from);
+  if (!cards?.[0] || cards[0].rank !== 13) return false;
+  if (move.from.pile === "waste") return true;
+  return isTableauKingToEmpty(state, move);
+}
+
+function listKingToEmpty(state: GameState): Move[] {
+  const dests: Dest[] = [];
+  for (let i = 0; i < 7; i++) {
+    if ((state.tableau[i] ?? []).length === 0) {
+      dests.push({ pile: "tableau", index: i });
+    }
+  }
+  if (dests.length === 0) return [];
+  const froms: Source[] = [];
+  const waste = topOf(state.waste);
+  if (waste?.rank === 13) froms.push({ pile: "waste" });
+  for (let col = 0; col < 7; col++) {
+    const pile = state.tableau[col]!;
+    const firstUp = pile.findIndex((card) => card.faceUp);
+    if (firstUp > 0 && pile[firstUp]!.rank === 13) {
+      froms.push({ pile: "tableau", index: col, cardIndex: firstUp });
+    }
+  }
+  const moves: Move[] = [];
+  for (const from of froms) {
+    for (const to of dests) {
+      if (!tryMove(state, from, to)) continue;
+      const kind: Move["kind"] =
+        from.pile === "waste" ? "waste" : "reveal";
+      const move: Move = { from, to, kind };
+      if (from.pile === "tableau" && !isTableauKingToEmpty(state, move)) continue;
+      moves.push(move);
+    }
+  }
+  return moves;
+}
+
+function kingMoveUnhides(state: GameState, from: Source): boolean {
+  if (from.pile !== "tableau") return false;
+  return (state.tableau[from.index] ?? [])
+    .slice(0, from.cardIndex)
+    .some((card) => !card.faceUp);
 }
 
 function isWasteLanding(state: GameState, from: Source): boolean {
@@ -463,17 +560,33 @@ function foundationUnblocks(state: GameState, move: Move): boolean {
   return listLegalMoves(next).some((step) => {
     if (step.from.pile !== "tableau") return false;
     if (step.to.pile !== "tableau" || step.to.index !== destCol) return false;
-    return exposesFoundationCard(next, step);
+    return exposesPlayableVisible(next, step);
   });
 }
 
+function consolidatesTableau(state: GameState, move: Move): boolean {
+  if (move.from.pile !== "tableau" || move.to.pile !== "tableau") return false;
+  if (isKingStackWithoutHidden(state, move)) return false;
+  if ((state.tableau[move.to.index] ?? []).length === 0) return false;
+  if (move.kind === "reveal") return true;
+  if (move.from.cardIndex !== 0) return false;
+  const next = tryMove(state, move.from, move.to);
+  if (!next) return false;
+  return (next.tableau[move.from.index] ?? []).length === 0;
+}
+
 function isAdvancingMove(state: GameState, move: Move): boolean {
+  if (isKingToEmpty(state, move)) return true;
+  if (move.to.pile === "tableau" && isKingStackWithoutHidden(state, move)) {
+    return false;
+  }
   if (move.kind === "foundation" || move.kind === "waste" || move.kind === "reveal") {
     return true;
   }
   if (move.from.pile === "foundation") return foundationUnblocks(state, move);
   if (isTableauKingToEmpty(state, move)) return true;
-  return exposesFoundationCard(state, move);
+  if (consolidatesTableau(state, move)) return true;
+  return exposesPlayableVisible(state, move);
 }
 
 function listAdvancingMoves(state: GameState): Move[] {
@@ -484,13 +597,6 @@ function isAceToFoundation(state: GameState, move: Move): boolean {
   if (move.to.pile !== "foundation") return false;
   const cards = getSourceCards(state, move.from);
   return Boolean(cards?.[0] && cards[0].rank === 1);
-}
-
-function isWholeVisibleStack(state: GameState, move: Move): boolean {
-  if (move.from.pile !== "tableau" || move.to.pile !== "tableau") return false;
-  const pile = state.tableau[move.from.index]!;
-  const firstUp = pile.findIndex((card) => card.faceUp);
-  return firstUp >= 0 && move.from.cardIndex === firstUp;
 }
 
 function isTopCardReveal(state: GameState, move: Move): boolean {
@@ -524,10 +630,18 @@ function chooseAdvancing(
     isAceToFoundation(state, move),
   );
   if (ace) return ace;
+  const unhideKing = pickAdvancing(state, listKingToEmpty(state), seen, (move) =>
+    move.from.pile === "waste" || kingMoveUnhides(state, move.from),
+  );
+  if (unhideKing) return unhideKing;
   const king = pickAdvancing(state, moves, seen, (move) =>
     isTableauKingToEmpty(state, move),
   );
   if (king) return king;
+  const openKing = pickAdvancing(state, moves, seen, (move) =>
+    consolidatesTableau(state, move),
+  );
+  if (openKing) return openKing;
   const uncover = pickAdvancing(state, moves, seen, (move) =>
     isTopCardReveal(state, move),
   );
@@ -542,10 +656,6 @@ function chooseAdvancing(
     });
     if (hit) return hit;
   }
-  const pack = pickAdvancing(state, listLegalMoves(state), seen, (move) =>
-    isWholeVisibleStack(state, move),
-  );
-  if (pack) return pack;
   return null;
 }
 
@@ -564,10 +674,15 @@ export function findAutoplayStep(
 ): { from: Source; to: Dest } | "draw" | null {
   const hit = chooseAdvancing(state, seen);
   if (hit) return hit;
-  if (canAdvanceByDrawing(state)) return "draw";
   const leftover = listLegalMoves(state).filter((move) => {
+    if (isKingToEmpty(state, move)) return true;
     if (move.from.pile === "foundation") return false;
-    return move.to.pile === "foundation" || move.from.pile === "waste";
+    if (move.to.pile === "tableau" && isKingStackWithoutHidden(state, move)) {
+      return false;
+    }
+    if (move.to.pile === "foundation" || move.from.pile === "waste") return true;
+    if (move.kind === "reveal") return true;
+    return exposesPlayableVisible(state, move) || consolidatesTableau(state, move);
   });
   for (const move of leftover) {
     const next = tryMove(state, move.from, move.to);
@@ -575,6 +690,7 @@ export function findAutoplayStep(
     if (seen.has(positionKey(next))) continue;
     return { from: move.from, to: move.to };
   }
+  if (canAdvanceByDrawing(state)) return "draw";
   return null;
 }
 
@@ -595,7 +711,8 @@ export function describeAction(
 ): string {
   if (step === "draw") {
     if (state.stock.length === 0) return "Redeal stock";
-    return state.drawCount === 3 ? "Draw 3" : "Draw 1";
+    const n = Math.min(state.drawCount, state.stock.length);
+    return n === 1 ? "Draw 1" : `Draw ${n}`;
   }
   const cards = getSourceCards(state, step.from);
   const head = cards?.[0];
@@ -652,11 +769,6 @@ export function hintsForAction(
   return annotateHints(listHintLabels(state), chosen);
 }
 
-function stockWasteKey(state: GameState): string {
-  const ids = (cards: Card[]) => cards.map((card) => card.id).join(",");
-  return `${ids(state.stock)}|${ids(state.waste)}`;
-}
-
 export function positionKey(state: GameState): string {
   const ids = (cards: Card[]) =>
     cards.map((card) => `${card.id}${card.faceUp ? "+" : "-"}`).join(",");
@@ -670,27 +782,14 @@ export function positionKey(state: GameState): string {
 
 function canAdvanceByDrawing(state: GameState): boolean {
   if (state.stock.length === 0 && state.waste.length === 0) return false;
-  if (state.drawCount === 3) {
-    const passes = state.stockPasses ?? 0;
-    if (state.stock.length === 0 && passes >= 2) return false;
-    if (passes < 2) return true;
-    return state.stock.length > 0;
-  }
-  const seen = new Set<string>();
-  let cursor = state;
-  while (seen.size < 80) {
-    const key = stockWasteKey(cursor);
-    if (seen.has(key)) return false;
-    seen.add(key);
-    if (listAdvancingMoves(cursor).length > 0) return true;
-    const next = draw(cursor);
-    if (!next) return false;
-    cursor = next;
-  }
-  return false;
+  if (state.drawCount === 1) return state.stock.length > 0;
+  const passes = state.stockPasses ?? 0;
+  if (state.stock.length === 0 && passes >= 2) return false;
+  if (passes < 2) return true;
+  return state.stock.length > 0;
 }
 
-/** True when autoplay (and a careful player) has nothing left to try. */
+/** True when autoplay has nothing left (pass limits apply; tableau shuffles don't count). */
 export function isStuck(state: GameState): boolean {
   if (state.won) return false;
   return findAutoplayStep(state, new Set()) === null;

@@ -85,6 +85,8 @@ export type GameState = {
   dealId: number;
   /** Completed trips through the stock (emptied). Draw-3 is limited to two. */
   stockPasses: number;
+  /** How many cards from the latest stock flip are still fanned on the waste. */
+  wasteFan: number;
 };
 
 export type Settings = {

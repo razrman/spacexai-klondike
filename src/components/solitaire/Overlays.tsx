@@ -1,3 +1,4 @@
+import { X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   formatTime,
@@ -90,7 +91,7 @@ export function HelpOverlay({
           <li>Build four foundations up by suit, Ace through King — hearts, clubs, diamonds, spades from left to right.</li>
           <li>On the table, stack cards down in alternating colors.</li>
           <li>Only a King may fill an empty column.</li>
-          <li>Tap the deck to draw. Switch 1 or 3 cards at the top.</li>
+          <li>Tap the deck to draw. Switch 1 or 3 cards at the top. Draw-one is one pass through the deck; draw-three may recycle twice.</li>
           <li>Drag a card or a face-up run. Tap to send it if there is one clear home.</li>
           <li>
             Keyboard: space draws, U undoes, H hints, A autoplays, L opens the
@@ -128,15 +129,33 @@ export function StuckOverlay({
   onUndo,
   onNew,
   onLog,
+  onClose,
 }: {
   canUndo: boolean;
   onUndo: () => void;
   onNew: () => void;
   onLog: () => void;
+  onClose: () => void;
 }) {
   return (
-    <div className="overlay" role="dialog" aria-labelledby="stuck-title">
-      <div className="overlay-card max-w-sm">
+    <div
+      className="overlay"
+      role="dialog"
+      aria-labelledby="stuck-title"
+      onClick={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
+      <div className="overlay-card relative max-w-sm">
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          className="absolute top-3 right-3"
+          aria-label="Close"
+          onClick={onClose}
+        >
+          <X className="size-4" />
+        </Button>
         <p className="text-xs tracking-[0.2em] text-muted uppercase">Dead end</p>
         <h2
           id="stuck-title"
@@ -145,9 +164,18 @@ export function StuckOverlay({
           No Move Available
         </h2>
         <p className="mt-3 text-sm leading-relaxed text-cream/75">
-          Nothing left on this deal will play — not from the table, and not by drawing.
+          Autoplay has nothing left. Close this and keep moving cards or
+          flipping the stock by hand.
         </p>
         <div className="mt-6 flex gap-3">
+          <Button className="flex-1" onClick={onClose}>
+            Keep playing
+          </Button>
+          <Button variant="outline" className="flex-1" onClick={onNew}>
+            New game
+          </Button>
+        </div>
+        <div className="mt-3 flex gap-3">
           <Button
             variant="outline"
             className="flex-1"
@@ -156,13 +184,10 @@ export function StuckOverlay({
           >
             Undo
           </Button>
-          <Button className="flex-1" onClick={onNew}>
-            New game
+          <Button className="flex-1" variant="outline" onClick={onLog}>
+            Move log
           </Button>
         </div>
-        <Button className="mt-3 w-full" variant="outline" onClick={onLog}>
-          Move log
-        </Button>
       </div>
     </div>
   );
@@ -324,27 +349,5 @@ function LogTable({
         </li>
       ))}
     </ol>
-  );
-}
-
-export function Confetti({ active }: { active: boolean }) {
-  if (!active) return null;
-  const bits = Array.from({ length: 28 }, (_, i) => i);
-  return (
-    <div className="confetti" aria-hidden="true">
-      {bits.map((i) => (
-        <span
-          key={i}
-          style={{
-            left: `${4 + ((i * 37) % 92)}%`,
-            animationDelay: `${(i % 8) * 70}ms`,
-            animationDuration: `${1400 + (i % 5) * 220}ms`,
-            background: i % 3 === 0 ? "#f4ead8" : i % 3 === 1 ? "#b4232a" : "#1a4a38",
-            width: i % 2 === 0 ? 8 : 6,
-            height: i % 2 === 0 ? 12 : 8,
-          }}
-        />
-      ))}
-    </div>
   );
 }

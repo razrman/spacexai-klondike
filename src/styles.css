@@ -488,6 +488,10 @@
   overflow: hidden;
 }
 
+.land-confetti.is-win {
+  z-index: 28;
+}
+
 .land-fall-card {
   --card-w: 52px;
   --card-h: 73px;
@@ -789,8 +793,52 @@
   align-items: center;
 }
 
+.land-stats-section .land-copy {
+  max-width: 56rem;
+}
+
+.land-stats {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin: 28px 0 0;
+}
+
+.land-stat {
+  margin: 0;
+  padding: 14px 16px;
+  border-radius: var(--radius-lg);
+  background: color-mix(in oklab, var(--color-cream) 6%, transparent);
+  border: 1px solid color-mix(in oklab, var(--color-cream) 10%, transparent);
+}
+
+.land-stat dt {
+  margin: 0;
+  font-size: 0.72rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--color-muted);
+}
+
+.land-stat dd {
+  margin: 6px 0 0;
+  font-family: var(--font-display);
+  font-size: 1.65rem;
+  font-weight: 600;
+  line-height: 1.1;
+  color: var(--color-cream);
+  font-variant-numeric: tabular-nums;
+}
+
+@media (min-width: 640px) {
+  .land-stats {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+  }
+}
+
 .land-try {
-  margin-top: 8px;
+  margin-top: 4px;
+  margin-bottom: 8px;
   min-height: 3.25rem;
   padding-inline: 2rem;
   font-size: 1.05rem;

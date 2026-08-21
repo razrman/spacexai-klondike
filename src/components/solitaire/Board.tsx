@@ -72,6 +72,7 @@ export function Board({
   drag,
   layout,
   busy,
+  freeStock,
   onDraw,
   onActivate,
   onDrop,
@@ -84,6 +85,7 @@ export function Board({
   drag: DragState | null;
   layout: Layout;
   busy: boolean;
+  freeStock?: boolean;
   onDraw: () => void;
   onActivate: (from: Source) => void;
   onDrop: (from: Source, to: Dest) => boolean;
@@ -113,6 +115,9 @@ export function Board({
           <StockPile
             count={state.stock.length}
             wasteCount={state.waste.length}
+            drawCount={state.drawCount}
+            stockPasses={state.stockPasses ?? 0}
+            freeStock={Boolean(freeStock)}
             hinted={hint === "draw"}
             disabled={busy}
             onDraw={onDraw}
@@ -120,6 +125,7 @@ export function Board({
           <WastePile
             waste={state.waste}
             drawCount={state.drawCount}
+            wasteFan={state.wasteFan ?? 0}
             fan={fan}
             compact={compact}
             hidden={hidden}
@@ -185,17 +191,26 @@ export function Board({
 function StockPile({
   count,
   wasteCount,
+  drawCount,
+  stockPasses,
+  freeStock,
   hinted,
   disabled,
   onDraw,
 }: {
   count: number;
   wasteCount: number;
+  drawCount: 1 | 3;
+  stockPasses: number;
+  freeStock?: boolean;
   hinted: boolean;
   disabled: boolean;
   onDraw: () => void;
 }) {
-  const canDraw = count > 0 || wasteCount > 0;
+  const canDraw =
+    count > 0 ||
+    (wasteCount > 0 &&
+      (Boolean(freeStock) || (drawCount === 3 && stockPasses < 2)));
   return (
     <button
       type="button"
@@ -203,7 +218,7 @@ function StockPile({
       aria-label={
         count > 0
           ? `Draw cards, ${count} remaining`
-          : wasteCount > 0
+          : canDraw
             ? "Redeal stock"
             : "Empty stock"
       }
@@ -229,6 +244,7 @@ function StockPile({
 function WastePile({
   waste,
   drawCount,
+  wasteFan,
   fan,
   compact,
   hidden,
@@ -241,6 +257,7 @@ function WastePile({
 }: {
   waste: Card[];
   drawCount: 1 | 3;
+  wasteFan: number;
   fan: number;
   compact: boolean;
   hidden: Set<string>;
@@ -251,9 +268,9 @@ function WastePile({
   onDragChange: (drag: DragState | null) => void;
   onDrop: (from: Source, to: Dest) => boolean;
 }) {
-  const visible = waste.slice(
-    Math.max(0, waste.length - (drawCount === 3 ? 3 : 1)),
-  );
+  const fanN =
+    wasteFan > 0 ? wasteFan : waste.length > 0 ? 1 : 0;
+  const visible = waste.slice(Math.max(0, waste.length - fanN));
   const width = `calc(var(--card-w) + ${Math.max(0, visible.length - 1) * fan}px)`;
   return (
     <div className="relative" style={{ width, height: "var(--card-h)" }}>

@@ -13,7 +13,7 @@ const LOGS_KEY = "klondike.logs.v1";
 const SAVE_VERSION = 1 as const;
 
 export const defaultSettings: Settings = {
-  drawCount: 1,
+  drawCount: 3,
   sound: true,
 };
 
@@ -115,7 +115,7 @@ export function loadSnapshot(): Snapshot | null {
         ? parsed.history.filter(isState).map(normalizeFoundations).slice(-40)
         : [],
       settings: {
-        drawCount: parsed.settings?.drawCount === 3 ? 3 : 1,
+        drawCount: parsed.settings?.drawCount === 1 ? 1 : 3,
         sound: parsed.settings?.sound !== false,
       },
       stats: { ...defaultStats, ...parsed.stats },

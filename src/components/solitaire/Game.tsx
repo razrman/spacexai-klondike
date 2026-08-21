@@ -5,10 +5,10 @@ import {
   useBoardLayout,
   type DragState,
 } from "./Board";
+import { FallingCards } from "./FallingCards";
 import { Hud } from "./Hud";
 import {
   ConfirmNew,
-  Confetti,
   HelpOverlay,
   LogOverlay,
   StuckOverlay,
@@ -67,7 +67,7 @@ function destOf(from: Source): Dest | null {
 
 export function Game() {
   const [state, setState] = useState<GameState>(() =>
-    createGame({ seed: 1, drawCount: 1 }),
+    createGame({ seed: 1, drawCount: 3 }),
   );
   const [history, setHistory] = useState<GameState[]>([]);
   const [settings, setSettings] = useState<Settings>(defaultSettings);
@@ -93,6 +93,7 @@ export function Game() {
   const toastTimer = useRef<number>(0);
   const completeRef = useRef(false);
   const [hydrated, setHydrated] = useState(false);
+  const [stuckDismissed, setStuckDismissed] = useState(false);
 
   useEffect(() => {
     const snap = loadSnapshot();
@@ -148,12 +149,18 @@ export function Game() {
   }, [state.startedAt, state.won, state.finishedAt]);
 
   useEffect(() => {
-    if (!hydrated || state.won || state.finishedAt) return;
-    if (!isStuck(state)) return;
-    setState((s) =>
-      s.won || s.finishedAt ? s : { ...s, finishedAt: Date.now() },
-    );
-    setAutoplay(false);
+    if (!hydrated || state.won) return;
+    if (isStuck(state)) {
+      setState((s) =>
+        s.won || s.finishedAt ? s : { ...s, finishedAt: Date.now() },
+      );
+      setAutoplay(false);
+      return;
+    }
+    setStuckDismissed(false);
+    if (state.finishedAt) {
+      setState((s) => (s.finishedAt ? { ...s, finishedAt: null } : s));
+    }
   }, [hydrated, state]);
 
   const showToast = useCallback((text: string) => {
@@ -258,7 +265,9 @@ export function Game() {
   const handleDraw = useCallback(() => {
     if (busy || autoplay) return;
     unlockAudio();
-    const next = draw(state);
+    const next = draw(state, {
+      ignorePassLimit: stuckDismissed || isStuck(state),
+    });
     if (!next) {
       playSfx("illegal");
       if (isStuck(state)) {
@@ -275,7 +284,7 @@ export function Game() {
       label: describeAction(state, "draw"),
       hints: hintsForAction(state, "draw"),
     });
-  }, [autoplay, busy, commit, state]);
+  }, [autoplay, busy, commit, state, stuckDismissed]);
 
   const handleMove = useCallback(
     (from: Source, to: Dest, quiet = false): boolean => {
@@ -375,9 +384,10 @@ export function Game() {
 
     const stop = (exhausted = false) => {
       if (cancelled) return;
+      const current = stateRef.current;
       setAutoplay(false);
       setHint(null);
-      if (exhausted) {
+      if (exhausted && isStuck(current)) {
         setState((s) =>
           s.won || s.finishedAt ? s : { ...s, finishedAt: Date.now() },
         );
@@ -389,14 +399,14 @@ export function Game() {
       const current = stateRef.current;
       const step = findAutoplayStep(current, seen);
       if (!step) {
-        stop(true);
+        stop(isStuck(current));
         return;
       }
       const label = describeAction(current, step);
       if (step === "draw") {
         const next = draw(current);
         if (!next) {
-          stop(true);
+          stop(isStuck(current));
           return;
         }
         commitRef.current(next, current.stock.length === 0 ? "flip" : "draw", {
@@ -411,12 +421,12 @@ export function Game() {
       }
       const next = tryMove(current, step.from, step.to);
       if (!next) {
-        stop(true);
+        stop(isStuck(current));
         return;
       }
       const key = positionKey(next);
       if (seen.has(key)) {
-        stop(true);
+        stop(isStuck(current));
         return;
       }
       seen.add(key);
@@ -436,6 +446,7 @@ export function Game() {
 
     const pulse = () => {
       if (cancelled) return;
+      window.clearTimeout(delayId);
       const current = stateRef.current;
       if (current.won) {
         stop();
@@ -447,7 +458,7 @@ export function Game() {
       }
       const step = findAutoplayStep(current, seen);
       if (!step) {
-        stop(true);
+        stop(isStuck(current));
         return;
       }
       setHint(step);
@@ -518,6 +529,7 @@ export function Game() {
         setShowLog(false);
         setConfirmNew(null);
         setAutoplay(false);
+        setStuckDismissed(true);
       }
     };
     window.addEventListener("keydown", onKey);
@@ -528,7 +540,8 @@ export function Game() {
   const time = elapsedSeconds(state, now);
   const score = displayedScore(state, now);
   const finishable = canAutoComplete(state);
-  const stuck = !busy && !autoplay && !state.won && (isStuck(state) || Boolean(state.finishedAt));
+  const stuck = !busy && !autoplay && !state.won && isStuck(state);
+  const showStuck = stuck && !stuckDismissed;
 
   return (
     <div
@@ -572,7 +585,8 @@ export function Game() {
           hint={hint}
           drag={filledDrag}
           layout={layout}
-          busy={busy || stuck || autoplay}
+          busy={busy || autoplay}
+          freeStock={stuckDismissed || stuck}
           onDraw={handleDraw}
           onActivate={handleActivate}
           onDrop={handleMove}
@@ -600,7 +614,7 @@ export function Game() {
       ) : null}
       {state.won ? (
         <>
-          <Confetti active />
+          <FallingCards layer="win" />
           <WinOverlay
             time={time}
             moves={state.moves}
@@ -610,12 +624,13 @@ export function Game() {
             onLog={() => setShowLog(true)}
           />
         </>
-      ) : stuck ? (
+      ) : showStuck ? (
         <StuckOverlay
           canUndo={history.length > 0}
           onUndo={handleUndo}
           onNew={() => dealNew(settings.drawCount)}
           onLog={() => setShowLog(true)}
+          onClose={() => setStuckDismissed(true)}
         />
       ) : null}
       {showLog ? (
