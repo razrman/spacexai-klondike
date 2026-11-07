@@ -2,6 +2,12 @@
 
 Classic Klondike solitaire on a felt table, with a Starship reentry landing page and SpaceXAI card backs.
 
+## Goals
+
+Build a playable Klondike solitaire game, then add Auto Play and a depth-first search so a deal can be brute-forced for winnability.
+
+DFS walks every legal path. When a line stops, it backtracks to the latest decision in the tree and tries the next untried branch, until the deal is won or every path has been tested.
+
 ## Play
 
 - Drag cards, or click a card then its destination.
